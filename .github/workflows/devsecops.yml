@@ -1,0 +1,82 @@
+# DevSecOps pipeline with fail-fast security gates.
+# Each stage needs the previous one: the first failing gate stops the run,
+# so insecure code never reaches the build.
+name: DevSecOps pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: 1 · Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # scan the whole history, not only the last commit
+      - name: Install gitleaks (checksum verified)
+        run: |
+          curl -sSfL -o gitleaks.tgz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz gitleaks
+      - name: Scan git history
+        run: ./gitleaks detect --source . --no-banner --redact --verbose
+
+  sast:
+    name: 2 · SAST (Bandit)
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: pip install bandit==1.9.4
+      - name: Fail on medium and high findings
+        run: bandit -r . -x ./tests -ll
+
+  test:
+    name: 3 · Unit tests (pytest)
+    needs: sast
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+
+  sca:
+    name: 4 · Dependency scan (pip-audit)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit==2.10.1
+      - name: Fail on any known vulnerability
+        run: pip-audit -r requirements.txt --strict
+
+  build-and-scan:
+    name: 5 · Build and image scan (Trivy)
+    needs: sca
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build image
+        run: |
+          docker build -t devsecops-demo:${{ github.sha }} .
+          docker save -o image.tar devsecops-demo:${{ github.sha }}
+      - name: Fail on critical, fixable vulnerabilities
+        # The image is scanned from a tar file, so the scanner gets no access to the Docker socket
+        run: |
+          docker run --rm -v "$PWD:/work" aquasec/trivy:0.76.2 image \
+            --input /work/image.tar --severity CRITICAL --ignore-unfixed --exit-code 1

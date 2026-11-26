@@ -1,432 +1,92 @@
-# 🛡️ Лабораторна робота: CI/CD з безпековими перевірками
+# DevSecOps pipeline with fail-fast security gates
 
-## 📋 Мета роботи
+[![DevSecOps pipeline](https://github.com/tobolovskaya/devsecops-pipeline-lab/actions/workflows/devsecops.yml/badge.svg)](https://github.com/tobolovskaya/devsecops-pipeline-lab/actions/workflows/devsecops.yml)
 
-Навчитися будувати CI/CD-пайплайн з інтегрованими етапами безпеки (secret scanning, SAST, SCA) та зрозуміти, як пайплайн реагує на вразливості. Ознайомитися з реальним підходом **«fail fast»** у DevSecOps.
+> 🇳🇴 **Kort på norsk:** En CI/CD-pipeline i GitHub Actions for et lite Flask-API, med sikkerhetsporter i rekkefølge: hemmelighetsskanning, SAST, tester, avhengighetsskanning og skanning av container-bildet. Første port som feiler stopper hele kjøringen, så usikker kode aldri blir bygget.
 
-## 📖 Опис застосунку
+A small Flask API with a CI/CD pipeline where every stage is a security gate. The stages run in order and each one needs the previous one, so the **first failing gate stops the run** and insecure code is never built.
 
-Демонстраційний застосунок для керування замовленнями (Order Management System):
-- **Мова:** Python 3.9
-- **Фреймворк:** Flask
-- **База даних:** SQLite
-- **Функціонал:** REST API + веб-форма для створення та перегляду замовлень
+**Skills shown:** GitHub Actions · secret scanning (gitleaks) · SAST (Bandit) · SCA (pip-audit) · container scanning (Trivy) · supply-chain hygiene (pinned actions, verified downloads, Dependabot) · secure Python and Docker
 
----
+## Pipeline
 
-## 🚀 Підготовка середовища
-
-### Крок 1: Створення проєкту в GitLab
-
-1. Зареєструйтесь або авторизуйтесь у [GitLab](https://gitlab.com)
-2. Створіть новий проєкт: **New Project** → **Create blank project**
-3. Назвіть проєкт, наприклад: `cicd-devsecops-lab`
-4. Виберіть видимість: **Private** або **Public**
-5. Натисніть **Create project**
-
-### Крок 2: Додавання файлів до репозиторію
-
-Додайте наступні файли до вашого GitLab проєкту:
-
-#### Обов'язкові файли:
-- ✅ `app.py` - головний файл застосунку
-- ✅ `test_app.py` - **використовуйте версію з теки `Good/`**
-- ✅ `requirements.txt` - залежності Python
-- ✅ `Dockerfile` - Docker конфігурація
-- ✅ `.gitlab-ci.yml` - CI/CD конфігурація
-
-#### Структура репозиторію:
-```
-CICD_DevSecOps/
-├── app.py                 # Flask застосунок
-├── test_app.py           # Тести (спочатку з Good/)
-├── requirements.txt      # Python залежності
-├── Dockerfile           # Docker образ
-├── .gitlab-ci.yml       # CI/CD пайплайн
-├── README.md            # Цей файл
-├── Good/
-│   └── test_app.py      # Безпечна версія тестів
-└── Bad/
-    └── test_app.py      # Версія з вразливостями
+```mermaid
+flowchart LR
+    A[1 · Secret scan<br/>gitleaks] --> B[2 · SAST<br/>Bandit]
+    B --> C[3 · Tests<br/>pytest]
+    C --> D[4 · Dependencies<br/>pip-audit]
+    D --> E[5 · Build + image scan<br/>Docker · Trivy]
 ```
 
----
+| Gate | Tool | Fails when |
+|---|---|---|
+| 1 · Secret scan | gitleaks 8.30.1 | a secret is found anywhere in the **git history**, not only in the last commit |
+| 2 · SAST | Bandit 1.9.4 | a medium or high severity issue is found in the code |
+| 3 · Tests | pytest | a test fails |
+| 4 · Dependencies | pip-audit 2.10.1 | a pinned dependency has a known vulnerability |
+| 5 · Image scan | Trivy 0.76.2 | the image has a critical vulnerability that already has a fix |
 
-## 🔍 Хід роботи
+## Security fixes in the app
 
-### Крок 1: Ознайомлення зі структурою репозиторію
+| Problem | Fix |
+|---|---|
+| `/execute` evaluates user input; with `eval()` that is remote code execution (Bandit B307) | `ast.literal_eval()` accepts only literals such as numbers and strings, and a test proves code is rejected |
+| The result was put into HTML unescaped: reflected XSS | output is escaped with `markupsafe.escape`, covered by a test |
+| `app.run(host="0.0.0.0")` in the code (Bandit B104) | removed; the container runs **gunicorn** as a non-root user |
+| Unpinned dependencies, so pip-audit could not check exact versions | versions pinned, updated weekly by Dependabot |
 
-#### 1.1 Перегляньте основні файли:
+## Supply chain
 
-**`app.py`** - Flask застосунок з REST API:
-- `GET /` - головна сторінка з формою
-- `POST /order` - створення замовлення
-- `GET /orders` - список замовлень
-- `GET /health` - перевірка здоров'я
+- GitHub Actions are pinned to **commit SHAs**, not tags. A moved tag cannot change what CI runs.
+- The gitleaks binary is downloaded with a **SHA-256 checksum check**.
+- Trivy scans the image from a **tar file**, so the scanner gets no access to the Docker socket.
+- `permissions: contents: read`: the workflow token cannot write to the repository.
 
-**`test_app.py`** - Unit тести для застосунку
+## Fail fast in practice
 
-**`.gitlab-ci.yml`** - конфігурація CI/CD пайплайну
+Open a pull request that adds insecure code, for example:
 
-#### 1.2 Вивчіть етапи CI/CD пайплайну:
+```python
+import subprocess
 
-| Етап | Опис | Інструмент |
-|------|------|------------|
-| **secret-scan** | Перевірка наявності секретів у коді | `detect-secrets` |
-| **sast** | Статичний аналіз безпеки коду | `bandit` |
-| **test** | Запуск unit тестів | `pytest` |
-| **build** | Збірка Docker образу | `docker` |
-| **sca** | Перевірка вразливостей у залежностях | `safety` |
-| **deploy** | Розгортання застосунку (симуляція) | - |
-| **dast** | Динамічний аналіз безпеки | `curl` |
+@app.route("/ping")
+def ping():
+    host = request.args.get("host", "")
+    subprocess.run(f"ping -c 1 {host}", shell=True)  # command injection
+    return "ok"
+```
 
----
+Bandit reports `B602 subprocess call with shell=True` with high severity, gate 2 fails, and tests, dependency scan and build never start.
 
-### Крок 2: Запуск початкового пайплайну
+## One accepted finding
 
-#### 2.1 Запустіть пайплайн:
+gitleaks flags a shortened example key (`sk-1234567890...`) in an old version of this README, where it illustrated what a secret scanner catches. It is not a real key, so its fingerprint is listed in [`.gitleaksignore`](.gitleaksignore) with the reason, instead of rewriting history.
 
-1. Виконайте невелику зміну в `README.md` (наприклад, додайте рядок)
-2. Закомітьте зміни:
-   ```bash
-   git add README.md
-   git commit -m "Initial pipeline run"
-   git push origin main
-   ```
+## How to run locally
 
-#### 2.2 Моніторинг пайплайну:
-
-1. Відкрийте GitLab → **Build** → **Pipelines**
-2. Знайдіть ваш запущений пайплайн
-3. Дочекайтеся завершення всіх етапів
-
-#### 2.3 Проаналізуйте результати:
-
-**Очікуваний результат:** ✅ Пайплайн завершується успішно
-
-Відкрийте логи кожного етапу:
-
-##### 📊 **Secret-scan**
-- Перевіряє код на наявність API ключів, паролів, токенів
-- **Статус:** `allow_failure: true` (не блокує пайплайн)
-- Шукайте повідомлення про знайдені секрети
-
-##### 📊 **SAST (bandit)**
-- Статичний аналіз коду на вразливості
-- Використовує правило: `-ll` (тільки medium і high severity)
-- Перевірте, чи є низькорівневі вразливості
-- **Важливо:** Низькі (Low) вразливості не блокують пайплайн
-
-##### 📊 **Test**
-- Запуск pytest тестів
-- Всі тести повинні пройти успішно ✅
-
-##### 📊 **Build**
-- Збірка Docker образу
-- Перевірте успішність збірки
-
-##### 📊 **SCA (safety)**
-- Перевірка вразливостей у залежностях (`requirements.txt`)
-- Може виявити застарілі версії бібліотек
-- **Статус:** `allow_failure: false` (блокує при критичних вразливостях)
-
-##### 📊 **Deploy**
-- Симуляція розгортання
-- Виконується тільки при успіху попередніх етапів
-
-##### 📊 **DAST**
-- Динамічна перевірка безпеки
-- Запускає застосунок і тестує `/health` endpoint
-
-#### 2.4 Знайдіть низькорівневі вразливості:
-
-**Можливі низькорівневі вразливості в "Good" версії:**
-- Використання `debug=False` замість `debug=True` (інформаційне)
-- Потенційні попередження про SQLite використання
-- Низькі (Low severity) попередження від bandit
-
-**❓ Питання для аналізу:**
-- Чому пайплайн пройшов успішно, якщо є вразливості?
-- Які вразливості вважаються прийнятними?
-
----
-
-### Крок 3: Імітація критичної вразливості
-
-#### 3.1 Заміна файлу на небезпечну версію:
-
-**Варіант 1: Через GitLab UI**
-1. Відкрийте файл `test_app.py` в GitLab
-2. Натисніть **Edit** → **Replace file content**
-3. Скопіюйте вміст з `Bad/test_app.py`
-4. Commit зміни з повідомленням: `"Add vulnerable code for testing"`
-
-**Варіант 2: Через Git**
 ```bash
-# Замініть локальний файл
-cp Bad/test_app.py test_app.py
-
-# Закомітьте зміни
-git add test_app.py
-git commit -m "Add vulnerable code for testing"
-git push origin main
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest -q
+bandit -r . -x ./tests,./.venv -ll
+pip-audit -r requirements.txt --strict
+docker build -t devsecops-demo . && docker run --rm -p 5000:5000 devsecops-demo
 ```
 
-#### 3.2 Запустіть пайплайн:
+Then open <http://localhost:5000/execute?code=123>.
 
-Пайплайн запуститься автоматично після push
+## Hva jeg lærte / What I learned
 
-#### 3.3 Дочекайтеся результатів:
-
-Спостерігайте за виконанням етапів
-
----
-
-### Крок 4: Аналіз результатів другого запуску
-
-#### 4.1 Відкрийте Pipeline:
-
-GitLab → **Build** → **Pipelines** → Останній запуск
-
-#### 4.2 Що сталося?
-
-**Очікуваний результат:** ❌ Пайплайн зупинився з помилкою
-
-#### 4.3 Знайдіть етап, де сталася помилка:
-
-**Можливі етапи failure:**
-
-##### 🔴 **Secret-scan** може знайти:
-- `API_KEY = "sk-1234567890..."`
-- `DATABASE_PASSWORD = "SuperSecret123!"`
-- `AWS_SECRET_KEY = "wJalrXUtn..."`
-
-Але цей етап має `allow_failure: true`, тому не блокує пайплайн.
-
-##### 🔴 **SAST (bandit)** знайде критичні вразливості:
-
-**High Severity Issues:**
-- ⚠️ **B602**: `subprocess.call(shell=True)` - Command Injection
-- ⚠️ **B301**: `pickle.loads()` - Unsafe Deserialization
-- ⚠️ **B307**: `eval()` - Arbitrary Code Execution
-- ⚠️ **B102**: `exec()` - Arbitrary Code Execution
-- ⚠️ **B105, B106**: Hardcoded passwords/secrets
-
-**Medium Severity Issues:**
-- ⚠️ **B303**: MD5 hash usage
-- ⚠️ **B311**: `random` instead of `secrets`
-- ⚠️ **B108**: Path traversal vulnerability
-
-##### 🛑 **Пайплайн зупиниться на етапі SAST!**
-
-Команда `bandit -r . -ll` виявить High/Medium вразливості та поверне exit code ≠ 0, що зупинить пайплайн.
-
-#### 4.4 Перегляньте логи SAST:
-
-```
-Run started: [timestamp]
-
-Test results:
->> Issue: [B602:subprocess_shell] subprocess call with shell=True identified
-   Severity: High   Confidence: High
-   Location: test_app.py:XX
-   
->> Issue: [B301:pickle] Pickle library appears to be in use
-   Severity: High   Confidence: High
-   Location: test_app.py:XX
-   
-... (більше вразливостей)
-
-Code scanned: X files
-Total issues (by severity):
-    High: X
-    Medium: X
-    Low: X
-```
-
-#### 4.5 Порівняння двох запусків:
-
-| Аспект | Запуск 1 (Good) | Запуск 2 (Bad) |
-|--------|----------------|---------------|
-| **Secret-scan** | ✅ Пройдено (або Low findings) | ⚠️ Знайдено секрети |
-| **SAST** | ✅ Пройдено (Low/Medium допустимі) | ❌ FAILED (High severity) |
-| **Test** | ✅ Всі тести пройшли | Не виконувалось |
-| **Build** | ✅ Образ зібрано | Не виконувалось |
-| **SCA** | ✅ Пройдено | Не виконувалось |
-| **Deploy** | ✅ Розгорнуто | Не виконувалось |
-| **DAST** | ✅ Пройдено | Не виконувалось |
-| **Результат** | ✅ SUCCESS | ❌ FAILED на SAST |
+- **A pipeline that never ran proves nothing.** The first version was a GitLab CI file in a GitHub repository, so it never started. Moving it to GitHub Actions made every gate real.
+- **Order matters.** Cheap checks (secrets, SAST) run first; the slow build and image scan run only when everything before them is clean.
+- **Scan the history, not the last commit.** A secret deleted in a later commit is still in git.
+- **Fixing one finding can open another.** `ast.literal_eval()` stopped code execution, but the output was still unescaped HTML: a reflected XSS that Bandit does not report.
+- **Pin and verify the tools themselves**, not only the app's dependencies.
 
 ---
 
-### Крок 5: Звіт (для домашнього завдання)
+Originally built as coursework during my MSc in Computer Science (Woolf / GoIT Neoversity) with GitLab CI, then moved to GitHub Actions and hardened.
 
-#### 5.1 Зробіть скриншоти:
+**Yevheniia Tobolovska** · IT operations and security · [Portfolio](https://my-portfolio-yevheniia-tobolovskas-projects.vercel.app/) · [LinkedIn](https://www.linkedin.com/in/yevheniia-tobolovska)
 
-1. **Скриншот 1:** Успішний пайплайн (Good версія)
-   - Показує всі зелені етапи
-   - Build → Pipelines → Успішний запуск
-
-2. **Скриншот 2:** Невдалий пайплайн (Bad версія)
-   - Показує червоний етап SAST
-   - Наступні етапи не виконувались
-
-3. **Скриншот 3:** Логи SAST з вразливостями
-   - Детальний список знайдених проблем
-
-#### 5.2 Відповідь на питання:
-
-**📝 1. Чому в першому випадку пайплайн завершився успішно?**
-
-*Приклад відповіді:*
-> У першому випадку (Good версія) пайплайн завершився успішно, оскільки:
-> - У коді не було виявлено критичних (High severity) вразливостей
-> - Всі етапи безпекових перевірок пройшли успішно або виявили лише низькорівневі проблеми
-> - SAST інструмент (bandit) з параметром `-ll` шукає лише Medium та High severity проблеми, і не знайшов критичних загроз
-> - Тести написані коректно, без небезпечних функцій (eval, exec, subprocess.call з shell=True)
-> - Не використовуються жорстко закодовані секрети в основному коді
-
-**📝 2. Чому у другому випадку пайплайн зупинився?**
-
-*Приклад відповіді:*
-> У другому випадку (Bad версія) пайплайн зупинився на етапі SAST, оскільки:
-> - Bandit виявив множинні критичні вразливості High severity:
->   - Command Injection (B602): використання subprocess.call з shell=True
->   - Unsafe Deserialization (B301): pickle.loads() з непевних даних
->   - Arbitrary Code Execution (B307, B102): використання eval() та exec()
->   - Hardcoded Secrets (B105, B106): паролі та API ключі в коді
-> - Конфігурація SAST етапу має `allow_failure: false`, що означає автоматичне блокування пайплайну при виявленні серйозних проблем
-> - Це спрацював механізм "Fail Fast" - пайплайн зупинився одразу після виявлення критичних проблем, не продовжуючи далі
-
-**📝 3. У чому різниця між першим і другим випадком?**
-
-*Приклад відповіді:*
-> Ключові різниці:
-> 
-> **Технічні відмінності:**
-> - Good версія: використовує безпечні практики програмування, параметризовані SQL запити, без небезпечних функцій
-> - Bad версія: містить 10+ критичних вразливостей, включаючи command injection, code execution, hardcoded secrets
-> 
-> **Результат безпекових перевірок:**
-> - Good: SAST не знайшов критичних проблем (exit code 0)
-> - Bad: SAST знайшов High severity проблеми (exit code ≠ 0)
-> 
-> **Поведінка пайплайну:**
-> - Good: всі 7 етапів виконались успішно, код потрапив до deploy
-> - Bad: зупинка на етапі 2 (SAST), наступні 5 етапів не виконувались
-
-**📝 4. Чи дійсно перший випадок безпечний і немає вразливостей?**
-
-*Приклад відповіді:*
-> Ні, перший випадок не є абсолютно безпечним:
-> 
-> **Можливі вразливості в Good версії:**
-> - Використання застарілих версій бібліотек (може виявити SCA)
-> - Потенційні низькорівневі (Low severity) попередження
-> - Відсутність деяких best practices (наприклад, rate limiting, CSRF protection)
-> - SQLite може мати обмеження для production середовища
-> 
-> **Але критична різниця:**
-> - Good версія: низькорівневі вразливості, які не є критичними загрозами
-> - Bad версія: критичні вразливості, які дозволяють виконання довільного коду
-> 
-> Перший випадок вважається "умовно безпечним" - прийнятним для розгортання з наступними покращеннями, на відміну від другого, який абсолютно неприйнятний.
-
-**📝 5. Як це ілюструє принцип "fail fast" у DevSecOps?**
-
-*Приклад відповіді:*
-> Принцип "Fail Fast" демонструється наступним чином:
-> 
-> **1. Рання детекція проблем:**
-> - Вразливості виявляються на етапі SAST (2-й етап з 7), а не в production
-> - Економія часу: немає потреби чекати build, deploy, DAST
-> 
-> **2. Автоматичне блокування:**
-> - Пайплайн автоматично зупиняється при виявленні критичних проблем
-> - Неможливо випадково задеплоїти вразливий код
-> 
-> **3. Швидкий фідбек розробникам:**
-> - Розробник одразу бачить, що саме не так
-> - Детальні логи з описом вразливостей та їх локацією
-> - Можливість швидко виправити до продовження
-> 
-> **4. Зменшення вартості виправлень:**
-> - Виправити вразливість на етапі розробки значно дешевше, ніж в production
-> - Запобігання потенційним інцидентам безпеки
-> 
-> **5. Культура безпеки:**
-> - Безпека інтегрована в процес розробки (Shift Left)
-> - Автоматизація не дає обійти перевірки
-> - Кожен коміт перевіряється на безпеку
-> 
-> Це ілюструє DevSecOps підхід: краще зупинити пайплайн зараз, ніж дозволити вразливостям потрапити в production.
-
----
-
-## 🔧 Додаткові завдання (опціонально)
-
-### Завдання 1: Виправлення вразливостей
-
-Спробуйте виправити вразливості в Bad версії:
-- Видаліть hardcoded secrets
-- Замініть `eval()` та `exec()` на безпечні альтернативи
-- Використайте `subprocess.run()` без `shell=True`
-- Замініть `pickle` на `json`
-
-### Завдання 2: Налаштування порогів
-
-Змініть `.gitlab-ci.yml` для різних порогів:
-```yaml
-# Блокувати тільки на High severity
-- bandit -r . -lll
-
-# Блокувати на Low та вище
-- bandit -r . -l
-```
-
-### Завдання 3: Додайте нові перевірки
-
-Додайте в пайплайн:
-- `pylint` для перевірки якості коду
-- `flake8` для стилю коду
-- `trufflehog` для пошуку секретів
-
----
-
-## 📚 Корисні посилання
-
-- [GitLab CI/CD Documentation](https://docs.gitlab.com/ee/ci/)
-- [Bandit Security Tool](https://bandit.readthedocs.io/)
-- [Safety - Dependency Scanner](https://pyup.io/safety/)
-- [OWASP Top 10](https://owasp.org/www-project-top-ten/)
-- [DevSecOps Best Practices](https://www.devsecops.org/)
-
----
-
-## 📝 Список файлів проєкту
-
-- `app.py` - Flask застосунок (REST API)
-- `test_app.py` - Unit тести (використовуйте Good версію спочатку)
-- `requirements.txt` - Python залежності
-- `Dockerfile` - Конфігурація Docker образу
-- `.gitlab-ci.yml` - CI/CD пайплайн конфігурація
-- `Good/test_app.py` - Безпечна версія тестів
-- `Bad/test_app.py` - Версія з критичними вразливостями
-- `README.md` - Ця інструкція
-
----
-
-## 🎯 Критерії успішного виконання
-
-✅ Створено GitLab проєкт з усіма файлами  
-✅ Запущено пайплайн з Good версією - успішно завершився  
-✅ Проаналізовано логи всіх етапів  
-✅ Замінено на Bad версію та запущено пайплайн  
-✅ Пайплайн зупинився на етапі SAST  
-✅ Зроблено скриншоти обох запусків  
-✅ Написано відповіді на всі 5 питань  
-✅ Зрозумілий принцип "Fail Fast" у DevSecOps  
-
----
-
-**Удачі у виконанні лабораторної роботи! 🚀**
+License: [MIT](LICENSE)
