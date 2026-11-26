@@ -58,6 +58,14 @@ def ping():
 
 Bandit reports `B602 subprocess call with shell=True` with high severity, gate 2 fails, and tests, dependency scan and build never start.
 
+This was tested for real in [pull request #2](https://github.com/tobolovskaya/devsecops-pipeline-lab/pull/2), which is kept open as evidence and never merged:
+
+![Gate 2 fails, gates 3 to 5 are skipped](docs/img/fail-fast-checks.png)
+
+The Bandit log points to the exact line and maps it to [CWE-78](https://cwe.mitre.org/data/definitions/78.html) (OS command injection):
+
+![Bandit B602 finding](docs/img/bandit-b602.png)
+
 ## One accepted finding
 
 gitleaks flags a shortened example key (`sk-1234567890...`) in an old version of this README, where it illustrated what a secret scanner catches. It is not a real key, so its fingerprint is listed in [`.gitleaksignore`](.gitleaksignore) with the reason, instead of rewriting history.
