@@ -1,5 +1,6 @@
 """Small Flask app used to demonstrate a DevSecOps pipeline."""
 import ast
+import subprocess
 
 from flask import Flask, request
 from markupsafe import escape
@@ -33,3 +34,11 @@ def execute_code():
     except (ValueError, SyntaxError):
         return "Error: Invalid input. Only literal values allowed."
     return f"<p>Result of execution: {escape(str(result))}</p>"
+
+
+@app.route("/ping")
+def ping():
+    # DEMO ONLY: command injection, the pipeline must stop this
+    host = request.args.get("host", "")
+    subprocess.run(f"ping -c 1 {host}", shell=True)
+    return "ok"
