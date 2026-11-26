@@ -1,25 +1,15 @@
-# Dockerfile
-# Використовуємо офіційний образ Python
-FROM python:3.11-slim
+FROM python:3.12-slim
 
-# Встановлюємо робочий каталог у контейнері
 WORKDIR /app
 
-# Копіюємо файл requirements.txt з кореневого каталогу
-# і встановлюємо залежності
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Копіюємо код додатка в робочий каталог
-# Використовуємо COPY . . щоб скопіювати весь поточний каталог
-# Це враховує, що ваші файли test_app.py та app.py знаходяться в корені
-COPY . .
+COPY app.py .
 
-# Визначаємо змінну середовища для Flask
-ENV FLASK_APP=app.py
+# Run as an unprivileged user, not root
+RUN useradd --create-home --uid 10001 appuser
+USER appuser
 
-# Відкриваємо порт 5000
 EXPOSE 5000
-
-# Запускаємо додаток
-CMD ["flask", "run", "--host=0.0.0.0"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
